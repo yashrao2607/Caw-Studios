@@ -1,0 +1,1 @@
+GET /links/2089 as user B (non-owner) -> HTTP 200 with full link data (id, code, short_url, long_url, created_at)

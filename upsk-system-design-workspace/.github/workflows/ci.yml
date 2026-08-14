@@ -1,0 +1,65 @@
+name: Production CI/CD Pipeline
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  pipeline:
+    name: Lint, Test, Build & Publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js Environment
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: Step 1 - Code Quality & Lint
+        run: npm run lint --if-present
+
+      - name: Step 2 - Automated Test Suite
+        run: npm test --if-present
+
+      - name: Step 3 - Multi-Stage Docker Build
+        run: |
+          IMAGE_TAG="${{ github.sha }}"
+          echo "Building Docker image with SHA tag: ${IMAGE_TAG}"
+          docker build -t notification-service:${IMAGE_TAG} .
+
+      - name: Step 4 - Image Size Guardrail (<200MB)
+        run: |
+          IMAGE_TAG="${{ github.sha }}"
+          SIZE_BYTES=$(docker image inspect notification-service:${IMAGE_TAG} --format='{{.Size}}')
+          SIZE_MB=$((SIZE_BYTES / 1024 / 1024))
+          echo "Built Image Size: ${SIZE_MB}MB"
+          if [ "$SIZE_MB" -gt 200 ]; then
+            echo "ERROR: Image size ${SIZE_MB}MB exceeds 200MB threshold limit."
+            exit 1
+          fi
+
+      - name: Step 5 - Push to Container Registry (Main Only)
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        env:
+          REGISTRY_USERNAME: ${{ secrets.REGISTRY_USERNAME }}
+          REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
+          REGISTRY_URL: ghcr.io
+        run: |
+          IMAGE_TAG="${{ github.sha }}"
+          echo "Logging into container registry..."
+          echo "${REGISTRY_PASSWORD}" | docker login ${REGISTRY_URL} -u "${REGISTRY_USERNAME}" --password-stdin
+          docker tag notification-service:${IMAGE_TAG} ${REGISTRY_URL}/${{ github.repository }}:${IMAGE_TAG}
+          docker tag notification-service:${IMAGE_TAG} ${REGISTRY_URL}/${{ github.repository }}:latest
+          docker push ${REGISTRY_URL}/${{ github.repository }}:${IMAGE_TAG}
+          docker push ${REGISTRY_URL}/${{ github.repository }}:latest
+          echo "Published image artifact: ${REGISTRY_URL}/${{ github.repository }}:${IMAGE_TAG}"

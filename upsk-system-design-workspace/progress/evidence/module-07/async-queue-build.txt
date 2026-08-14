@@ -1,0 +1,60 @@
+# Module 07 - Background Jobs & Analytics (BUILD evidence)
+
+Decision: async_queue (B). BullMQ + in-process worker (concurrency 5, attempts 3, exponential backoff).
+Dedupe via sha256 idempotency key on ClickEvent.dedupeKey (UNIQUE) + createMany skipDuplicates.
+
+## 1. Redirect -> queued click -> row written
+```
+curl -i /r/q4CBGI  x2  -> 302, 302
+worker log: "recorded click for q4CBGI (link 2089)"
+psql: SELECT COUNT(*) FROM ClickEvent WHERE linkId=2089 -> increased by 2
+```
+
+## 2. Protected analytics endpoint (owner-scoped)
+```
+GET /links/2089/analytics?from=2000-01-01&to=2100-01-01  (JWT owner A)
+-> {"link_id":2089,"click_count":N,"last_clicked_at":"..."}
+GET same with user B token -> 404 (owner scope enforced)
+bad from/to -> 400 BadRequestException
+```
+
+## 3. Idempotency: replay same payload twice -> 1 row
+```
+node script: clicksQueue.add("record-click", SAME payload) x2
+worker processed both jobs; createMany(skipDuplicates:true) deduped
+psql: SELECT COUNT(*) WHERE userAgent='idem-test' -> 1  (NOT 2)
+```
+
+## 4. Privacy: ip_hash only, no raw IP
+```
+ClickEvent schema: ipHash String? — no IP column anywhere.
+row shows sha256 ipHash prefix (eff8e7ca...) + userAgent stored
+```
+
+## 5. Queue-down drill (Redis stopped)
+```
+docker stop upsk-sdf-redis
+curl /r/q4CBGI -> 302 Found (x-cache: DOWN) — redirect unaffected, no hang
+docker start upsk-sdf-redis
+```
+
+## 6. Retention purge
+```
+INSERT ClickEvent with clickedAt = now() - 90 days (dedupeKey 'retention-seed-1')
+restart API with RETENTION_DAYS=0  (dev-only cutoff = now)
+purge runs on boot + every RETENTION_PURGE_INTERVAL_HOURS (default 24h)
+psql: SELECT COUNT(*) WHERE dedupeKey='retention-seed-1' -> 0  (deleted)
+log: "retention purge: deleted N click(s) older than 0d"
+```
+
+## Code changes
+- prisma/schema.prisma: ClickEvent.dedupeKey String? + @@unique([dedupeKey])
+- migration 20260813190000_click_dedupe_key (ALTER TABLE + CREATE UNIQUE INDEX)
+- src/queue/clicks.worker.ts: computes sha256 dedupeKey from code|clickedAt|ipHash|userAgent|referrer,
+  createMany skipDuplicates -> duplicate jobs skipped (logged as warn), attempts/backoff already set
+- src/queue/retention.service.ts: NEW - purge on boot + interval (RETENTION_DAYS default 30,
+  RETENTION_PURGE_INTERVAL_HOURS default 24), deleteMany clickedAt < cutoff
+- src/queue/queue.module.ts: registers RetentionService
+- src/links/links.service.ts: analyticsForUser(id, userId, from, to) - owner check + count + last_clicked_at
+- src/links/links.controller.ts: GET /links/:id/analytics (JwtAuthGuard, Throttle analytics 60/min,
+  from/to ISO date validation)

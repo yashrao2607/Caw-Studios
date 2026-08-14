@@ -1,0 +1,23 @@
+# Module 06 - BREAK (Hard): thundering herd on cache miss
+
+## Bug injected
+No single-flight / request coalescing on cache miss: every concurrent request that
+misses the cache issues its own DB query. Under an abuse spike (module twist) with a
+cold or expired key, N concurrent first-requests == N parallel DB reads of the same row.
+
+Simulated slow DB (+150ms) to guarantee overlapping in-flight requests:
+```
+docker exec upsk-sdf-redis redis-cli DEL "link:code:q4CBGI"
+30 concurrent: curl.exe -s -o NUL http://localhost:3000/r/q4CBGI  (parallel Start-ThreadJob)
+```
+Result: all 30 returned 302 OK, but:
+```
+[herd-instrument] DB load #1 for q4CBGI
+[herd-instrument] DB load #2 for q4CBGI
+[herd-instrument] DB load #3 for q4CBGI
+[herd-instrument] DB load #4 for q4CBGI
+[herd-instrument] DB load #5 for q4CBGI
+```
+5 parallel DB loads for ONE key that should have been loaded exactly once.
+Symptom: with slow DB this collapses to a stampede (DB connection pool exhaustion,
+latency spike) — the exact abuse_spike scenario from the module twist.

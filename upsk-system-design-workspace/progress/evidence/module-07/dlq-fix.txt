@@ -1,0 +1,41 @@
+# Module 07 - BREAK->FIX (Hard): missing DLQ -> silent analytics loss
+
+## Bug (before fix)
+Producer used `queue.add` with attempts:3 but NO dead-letter queue. A job failing all
+attempts landed in BullMQ's internal failed set and was never recovered or alerted —
+silent analytics loss.
+
+## Repro (before)
+Enqueue poisoned job (invalid clickedAt "NOT-A-DATE" -> Prisma createMany throws):
+```
+ZRANGE bull:clicks:failed 0 -1 WITHSCORES  -> 414 (attempts exhausted)
+ZCARD bull:clicks:failed                    -> 1
+HGET bull:clicks:414 failedReason           -> Invalid `this.prisma.clickEvent.createMany()` invocation...
+```
+Symptom: job dead in failed set, no DLQ, no alert, click lost silently.
+
+## Fix
+BullMQ FlowProducer pattern: parent job in `clicks-dlq` queue, child = click job in `clicks`.
+Child exhausts attempts (3, exponential backoff) -> parent fails -> DlqWorker on
+`clicks-dlq` raises ALERT + increments Redis counter `dlq:alert:count`.
+
+Files:
+- clicks.producer.ts: FlowProducer.add({queueName: 'clicks-dlq', children: [{queueName: 'clicks', ...}]})
+- dlq.worker.ts: NEW - Worker('clicks-dlq') concurrency 1, logs DLQ ALERT with job id/code/reason,
+  increments dlq:alert:count
+- queue.module.ts: registers 'clicks-dlq' queue + DlqWorker
+
+## Proof (after)
+```
+node poison-test.js (same poisoned payload via FlowProducer path)
+parent job key bull:clicks-dlq:<parent-id> exists with name record-click, finishedOn set
+docker exec upsk-sdf-redis redis-cli GET dlq:alert:count  -> 3   (3 alerts raised for 3 poisoned jobs)
+ZCARD bull:clicks-dlq:failed -> 0  (consumed by DlqWorker = alerts raised)
+```
+
+## Regression
+Normal redirects still record clicks through the new flow path:
+```
+curl /r/q4CBGI x2 -> 302, 302
+ClickEvent count for link 2089: 3 -> 5  (+2)
+```

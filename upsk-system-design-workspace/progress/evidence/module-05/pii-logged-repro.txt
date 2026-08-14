@@ -1,0 +1,1 @@
+Bug: Raw Authorization header logged in error path — all-exceptions.filter.ts warn branch logs authorizationHeader. Reproduced: GET /links with Bearer DO_NOT_LOG_ME_123 -> 401, sentinel value found in server logs (should never appear).

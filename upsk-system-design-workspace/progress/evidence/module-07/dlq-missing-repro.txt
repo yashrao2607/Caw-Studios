@@ -1,0 +1,22 @@
+# Module 07 - BREAK (Hard): missing DLQ -> silent analytics loss
+
+## Bug injected
+Producer has `attempts: 3` but NO dead-letter queue. A poisoned job that fails all
+attempts lands in BullMQ's internal failed set and is never recovered or alerted on
+— the click is silently lost. (Production reality: one bad payload, transient schema
+change, or a buggy deploy poisons a job; without a DLQ nobody ever notices.)
+
+## Repro
+Enqueue a poisoned job (invalid clickedAt = "NOT-A-DATE" -> new Date() invalid ->
+Prisma createMany throws):
+```
+node poison-test.js   (Queue 'clicks'.add with attempts:3, backoff exp)
+```
+Watch Redis:
+```
+ZRANGE bull:clicks:failed 0 -1 WITHSCORES  ->  (integer) 414  1786688203443
+ZCARD bull:clicks:failed                   ->  1
+HGET bull:clicks:414 failedReason          ->  Invalid `this.prisma.clickEvent.createMany()` invocation ...
+```
+Symptom: job 414 exhausted 3 attempts (exponential backoff), now dead in the failed
+set. No DLQ, no alert, no retry path — analytics for that click lost forever, silently.

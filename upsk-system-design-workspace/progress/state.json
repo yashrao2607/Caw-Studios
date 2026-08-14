@@ -1,0 +1,209 @@
+{
+  "bootcamp": {
+    "pretest": {
+      "self_rating": "strong",
+      "environment": "Windows PowerShell 7, all tools present",
+      "answers": {
+        "health_vs_readiness": "health = process alive, readiness = safe to serve traffic",
+        "redirect_misuse": "open redirect / phishing via trusted domain",
+        "500_first_checks": "logs, then recent deploys/config",
+        "idempotency": "same action twice = same safe result; retries must not double-process",
+        "index": "reads faster, writes slower",
+        "testing_style": "integration_heavy"
+      }
+    },
+    "product_scenario": "public_consumer",
+    "modules": {
+      "01": {
+        "label": "Setup & Clean Code",
+        "status": "complete",
+        "decisions": {
+          "project_layout": "monorepo",
+          "project_layout_reasoning": "Worker in Module 07 must share types with API; shared package prevents drift; each app keeps own Dockerfile; avoids future monorepo migration."
+        },
+        "bug": {
+          "category": "route-path drift",
+          "symptom": "GET /health -> 404, GET /healthz -> {ok:true}",
+          "root_cause": "HealthController route prefix changed from 'health' to 'healthz'",
+          "fix": "restored @Controller('health')",
+          "regression": "GET /health -> 200 {ok:true}; GET /healthz -> 404"
+        }
+      },
+      "02": {
+        "label": "Database Design & Selection",
+        "status": "complete",
+        "decisions": {
+          "database": "postgres",
+          "database_reasoning": "Hottest query is a single-row lookup by code (needs UNIQUE constraint for dedupe); analytics need GROUP BY aggregation over clicks; clicks are a separate table with FK to links. Relational model matches these patterns exactly; no need for document-store flexibility."
+        },
+        "indexes": {
+          "Link.code": "UNIQUE b-tree - exact redirect lookup (WHERE code = $1) + duplicate prevention",
+          "Link.created_by": "b-tree - owner dashboard 'my links' listing",
+          "ClickEvent(linkId, clickedAt)": "composite b-tree - per-link time-range analytics aggregation"
+        },
+        "infra": {
+          "postgres": "docker container upsk-sdf-postgres, postgres:16, host port 5433 (host PostgreSQL 18 service occupies 5432), db upsk_sdf",
+          "redis": "docker container upsk-sdf-redis, redis:7-alpine, port 6379 (for Module 6)",
+          "orm": "Prisma 7 (prisma.config.ts + @prisma/adapter-pg), migration 20260805111141_init"
+        },
+        "bug": {
+          "category": "missing index on frequently queried field",
+          "symptom": "EXPLAIN on redirect query -> Seq Scan (cost 0.00..55.03), 2001 rows filtered, despite code being the hottest lookup",
+          "root_cause": "Link_code_key UNIQUE index dropped from live DB while schema still declared @unique on code (silent schema/database drift)",
+          "fix": "CREATE UNIQUE INDEX \"Link_code_key\" ON \"Link\"(\"code\") to restore DB to match committed schema",
+          "regression": "Index Scan using Link_code_key (cost 0.28..8.29, rows=1); duplicate code insert rejected; prisma migrate status clean"
+        }
+      },
+      "03": {
+        "label": "Core API & CRUD",
+        "status": "complete",
+        "decisions": {
+          "redirect_style": "prefix_r",
+          "links_route": "links",
+          "redirect_prefix": "r"
+        },
+        "api": {
+          "create": "POST /links {long_url, expires_at?, tags?} -> 201 {id, code, short_url, long_url, created_at}",
+          "list": "GET /links?page&limit (paged)",
+          "get": "GET /links/:id",
+          "redirect": "GET /r/:code -> 302 + Location; 404 generic, no internal leaks",
+          "validation": "SafeHttpUrl: trim, reject control chars/backslashes/userinfo/encoded-scheme/encoded-slash/scheme-relative; http/https only; expires_at future; tags <=10x32"
+        },
+        "bug": {
+          "category": "missing input validation",
+          "symptom": "javascript:alert(1) and data:text/html payloads returned 201 and were STORED (previously 400)",
+          "root_cause": "SafeHttpUrl @Validate decorator removed from CreateLinkDto",
+          "fix": "restored @Validate(SafeHttpUrl)",
+          "regression": "abuse payloads -> 400 again; valid URL -> 201; poisoned rows deleted"
+        }
+      },
+      "04": {
+        "label": "Authentication & Authorization",
+        "status": "complete",
+        "decisions": {
+          "auth_method": "jwt",
+          "auth_method_reasoning": "JWT with 1h expiry over static API keys: expiry self-heals leaked tokens, claims carry sub identity for authorization rules (owner scoping, admin surface), stateless verification."
+        },
+        "reflection": {
+          "security_practice": "Authorization must be enforced per-resource (createdBy scoping), not just per-route; JWT proves identity, not access rights.",
+          "risk": "auth without per-object authorization + rate limits",
+          "mitigation": "owner scoping on every user-scoped read/delete + verified JWT signature/claims"
+        },
+        "bug": {
+          "category": "IDOR (authorization) — injected",
+          "symptom": "user B (non-owner) GET /links/2089 -> 200 with owner A's full payload (should be 404)",
+          "root_cause": "findOneForUser dropped createdBy filter (findFirst {id, createdBy} -> findUnique {id})",
+          "fix": "restored createdBy: userId scoping in findOneForUser",
+          "regression": "user B -> 404, user A -> 200; no-auth -> 401, valid JWT -> 200"
+        }
+      },
+      "05": {
+        "label": "Error Handling & Logging",
+        "status": "complete",
+        "decisions": {
+          "error_strategy": "graceful",
+          "error_strategy_reasoning": "Redirect hot path must never 500 on non-critical dependency failure - fall back to DB; analytics queue down must not block redirects (queue errors caught + logged). Fail-fast reserved for input validation (400) and boot-time config."
+        },
+        "reflection": {
+          "logging_rule": "Never let log fields and response bodies share the same trust boundary - enforce redaction at BOTH layers (pino redact paths + no raw header fields in logger context).",
+          "risk": "mystery hangs without explicit timeouts/readiness checks",
+          "mitigation": "requestId correlation + latencyMs logging + envelope on every 4xx/5xx"
+        },
+        "bug": {
+          "category": "PII logged in error message — injected",
+          "symptom": "sentinel DO_NOT_LOG_ME_123 in Authorization header appeared verbatim in server logs after 401",
+          "root_cause": "AllExceptionsFilter warn branch logged raw authorizationHeader field",
+          "fix": "removed authorizationHeader from warn log context; pino redact covers headers",
+          "regression": "sentinel absent from post-fix logs; health 200; envelopes still carry requestId"
+        }
+      },
+      "06": {
+        "label": "Caching with Redis",
+        "status": "complete",
+        "decisions": {
+          "cache_strategy": "cache_aside",
+          "cache_strategy_reasoning": "Reads dominate (redirect hot path); writes are rare (create/PATCH/DELETE). Cache-aside: miss -> DB -> populate with TTL; every mutation invalidates link:code:<code> + link:id:<id>. Write-through adds a Redis write to every mutation for zero read benefit and still needs delete invalidation."
+        },
+        "reflection": {
+          "new_failure_mode": "Stale-data serving when a mutation path forgets invalidation (silent until TTL) — cache-aside's control = responsibility; plus thundering herd on cold key under concurrency spike.",
+          "risk": "cache stampede on cold key + stale data after missed invalidation",
+          "mitigation": "single-flight coalescing (inflight Map per code) + TTL 3600 self-heal; invalidation in BOTH updateForUser and removeForUser; fail-fast ioredis (connectTimeout 2000, maxRetriesPerRequest 1, enableOfflineQueue false) with DB fallback (x-cache: DOWN) and auto-reconnect"
+        },
+        "bug": {
+          "category": "thundering herd on cache miss — injected",
+          "symptom": "30 concurrent cold-key redirects (DEL link:code:q4CBGI) -> 5 parallel DB loads of the same row (instrumented [herd-instrument] DB load #1..#5)",
+          "root_cause": "findByCode had no request coalescing: every cache miss issued its own DB query",
+          "fix": "single-flight via Map<code, Promise> so concurrent misses share one DB load; map cleared in finally",
+          "regression": "30 concurrent -> exactly 1 DB load; PATCH invalidation still serves new URL (x-cache MISS)"
+        }
+      },
+      "07": {
+        "label": "Background Jobs & Analytics",
+        "status": "complete",
+        "decisions": {
+          "jobs_strategy": "async_queue",
+          "jobs_strategy_reasoning": "Redirect is the hot path — inline writes make redirect latency hostage to database latency and pool exhaustion. Clicks are append-only telemetry where availability > immediate consistency. FlowProducer DLQ + unique dedupeKey provides reliability and idempotency."
+        },
+        "reflection": {
+          "operational_risk": "Producer/worker decoupling hides failures until jobs are silently lost or double-processed (missing DLQ, non-idempotent worker, queue-name mismatch).",
+          "risk": "poisoned jobs silently lost + double-counted retries",
+          "mitigation": "FlowProducer DLQ + DlqWorker alert counter + sha256 dedupeKey UNIQUE constraint + createMany skipDuplicates + retention purge"
+        },
+        "bug": {
+          "category": "missing DLQ → silent loss — injected",
+          "symptom": "Poisoned job exhausted 3 retries and sat in failed queue with zero alerting",
+          "root_cause": "Missing dead-letter queue routing and worker monitoring on permanent job failures",
+          "fix": "FlowProducer DLQ (parent in clicks-dlq, child in clicks) + dlq.worker.ts with DLQ ALERT logging and redis dlq:alert:count increment",
+          "regression": "Poisoned job triggers dlq alert count 1->3; normal redirects record clicks 3->5"
+        }
+      },
+      "next": {
+        "module": "08",
+        "step": "context"
+      }
+    }
+  },
+  "build_ahead": {
+    "staged_proofs": [
+      "m4-build.json",
+      "m5-build.json",
+      "m6-build.json",
+      "m7-build.json",
+      "m8-build.json",
+      "m9-build.json",
+      "m10-build.json"
+    ],
+    "next_action": "submit each module's proof via 'upsk next --summary --evidence' after Practitioner pack unlock; then run module verify/break/fix/reflect drills",
+    "modules": {
+      "10": {
+        "status": "built; compose validated",
+        "evidence": "progress/evidence/modules-05-10/build-ahead.md"
+      },
+      "05": {
+        "status": "built+verified",
+        "evidence": "progress/evidence/modules-05-10/build-ahead.md"
+      },
+      "09": {
+        "status": "built+verified; 27/27 e2e",
+        "evidence": "progress/evidence/modules-05-10/build-ahead.md"
+      },
+      "07": {
+        "status": "built+verified",
+        "evidence": "progress/evidence/modules-05-10/build-ahead.md"
+      },
+      "06": {
+        "status": "built+verified",
+        "evidence": "progress/evidence/modules-05-10/build-ahead.md"
+      },
+      "08": {
+        "status": "built+verified",
+        "evidence": "progress/evidence/modules-05-10/build-ahead.md"
+      },
+      "04": {
+        "status": "built+verified",
+        "proof": "Temp/opencode/m4-build.json",
+        "evidence": "progress/evidence/module-04/build-auth.md"
+      }
+    }
+  }
+}

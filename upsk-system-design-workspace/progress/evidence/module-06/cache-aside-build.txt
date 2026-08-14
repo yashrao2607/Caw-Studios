@@ -1,0 +1,48 @@
+# Module 06 - Caching with Redis (BUILD evidence)
+
+Code: q4CBGI (link id 2089), strategy: cache-aside (decide A)
+
+## 1. Cache miss -> DB hit + cache set; second redirect cache hit
+```
+$ docker exec upsk-sdf-redis redis-cli DEL "link:code:q4CBGI"
+(integer) 1
+
+1st redirect:  HTTP/1.1 302 Found | Location: https://idor-poc.cawstudios.com/proof | x-cache: MISS
+2nd redirect:  HTTP/1.1 302 Found | Location: https://idor-poc.cawstudios.com/proof | x-cache: HIT
+redis TTL:     3600  (key persisted with TTL)
+```
+
+## 2. Update link -> cache invalidated (no stale URL served)
+```
+PATCH /links/2089  {"long_url":"https://example.org/updated-target"}  -> 200, long_url updated
+redirect: HTTP/1.1 302 Found | Location: https://example.org/updated-target | x-cache: MISS
+(cache key was deleted on update; redirect resolves fresh from DB)
+```
+
+## 3. Redis down drill (graceful degradation, no hang)
+```
+$ docker stop upsk-sdf-redis
+redirect: HTTP/1.1 302 Found | Location: https://example.org/updated-target | x-cache: DOWN
+redirect: HTTP/1.1 302 Found | x-cache: DOWN
+```
+Redirect keeps working via DB fallback. Fail-fast client config:
+maxRetriesPerRequest: 1, enableOfflineQueue: false, connectTimeout: 2000
+(commands reject immediately instead of queueing forever).
+
+## 4. Redis recovery (no API restart needed)
+```
+$ docker start upsk-sdf-redis
+redirect: x-cache: HIT   <- client reconnected automatically, cache serves again
+```
+
+## Code changes
+- src/links/links.service.ts:
+  - updateForUser(id, userId, dto) - owner-scoped PATCH; invalidates link:code:<code> and link:id:<id>
+  - findByCode: cache-aside with TTL (REDIRECT_CACHE_TTL_SECONDS = 3600); on Redis error falls back to
+    loadFromDb(code, 'DOWN') which returns x-cache: DOWN instead of failing
+  - loadFromDb(): DB read; set/del guarded with catch so Redis outage never fails the request
+- src/links/links.controller.ts: PATCH /links/:id (JwtAuthGuard) with UpdateLinkDto
+- src/links/dto/update-link.dto.ts: optional long_url / expires_at (reuses SafeHttpUrl validator)
+- src/redis/redis.module.ts: fail-fast ioredis (connectTimeout 2000, maxRetriesPerRequest 1,
+  enableOfflineQueue false, retryStrategy backoff 500ms->5s cap so client auto-reconnects)
+- src/links/dto/create-link.dto.ts: SafeHttpUrl now accepts uppercase schemes (normalized via URL parsing)

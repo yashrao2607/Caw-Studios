@@ -1,0 +1,23 @@
+{
+  "inserted": 0,
+  "byCode": {
+    "id": 1,
+    "code": "abc123",
+    "longUrl": "https://example.com/docs/prisma",
+    "createdAt": "2026-08-05T11:14:16.614Z",
+    "createdBy": "user_42",
+    "expiresAt": null,
+    "tags": [
+      "docs",
+      "db"
+    ]
+  },
+  "explain": [
+    {
+      "QUERY PLAN": "Index Scan using \"Link_code_key\" on \"Link\"  (cost=0.15..8.17 rows=1 width=96)"
+    },
+    {
+      "QUERY PLAN": "  Index Cond: (code = 'abc123'::text)"
+    }
+  ]
+}

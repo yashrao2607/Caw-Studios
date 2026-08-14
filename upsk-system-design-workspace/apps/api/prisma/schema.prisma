@@ -1,0 +1,43 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model User {
+  id           Int      @id @default(autoincrement())
+  email        String   @unique
+  passwordHash String
+  createdAt    DateTime @default(now())
+}
+
+model Link {
+  id        Int       @id @default(autoincrement())
+  code      String    @unique
+  longUrl   String
+  createdAt DateTime  @default(now())
+  createdBy String?
+  expiresAt DateTime?
+  tags      String[]
+
+  clicks ClickEvent[]
+
+  @@index([createdBy])
+}
+
+model ClickEvent {
+  id        Int      @id @default(autoincrement())
+  linkId    Int
+  clickedAt DateTime @default(now())
+  userAgent String?
+  referrer  String?
+  ipHash    String?
+  dedupeKey String?
+
+  link Link @relation(fields: [linkId], references: [id], onDelete: Cascade)
+
+  @@unique([dedupeKey])
+  @@index([linkId, clickedAt])
+}
