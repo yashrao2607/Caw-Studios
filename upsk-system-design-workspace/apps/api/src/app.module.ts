@@ -10,6 +10,8 @@ import { RedisModule } from './redis/redis.module';
 import { QueueModule } from './queue/queue.module';
 import { LinksModule } from './links/links.module';
 import { AuthModule } from './auth/auth.module';
+import { MetricsModule } from './metrics/metrics.module';
+import { ResilienceModule } from './common/resilience/resilience.module';
 
 @Module({
   imports: [
@@ -44,6 +46,8 @@ import { AuthModule } from './auth/auth.module';
     QueueModule,
     LinksModule,
     AuthModule,
+    MetricsModule,
+    ResilienceModule,
   ],
   controllers: [AppController, HealthController],
   providers: [

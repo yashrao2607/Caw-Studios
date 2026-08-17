@@ -12,11 +12,19 @@ export class JwtAuthGuard implements CanActivate {
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
     const request = context.switchToHttp().getRequest();
-    const header = request.headers['authorization'] as string | undefined;
-    if (!header?.startsWith('Bearer ')) {
-      throw new UnauthorizedException('Missing bearer token');
+    const header = request.headers['authorization'];
+    if (!header || typeof header !== 'string' || !header.trim()) {
+      throw new UnauthorizedException('Authorization header required');
     }
-    const payload = await this.auth.validateToken(header.slice(7));
+    const parts = header.trim().split(/\s+/);
+    if (parts.length !== 2 || parts[0] !== 'Bearer') {
+      throw new UnauthorizedException('Invalid authorization format');
+    }
+    const token = parts[1];
+    if (!token || token.trim().length === 0) {
+      throw new UnauthorizedException('Bearer token missing');
+    }
+    const payload = await this.auth.validateToken(token);
     if (!payload) {
       throw new UnauthorizedException('Invalid or expired token');
     }
