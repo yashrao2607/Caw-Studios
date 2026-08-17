@@ -192,14 +192,29 @@ describe('Link shortener e2e', () => {
       expect(res.body.total).toBeGreaterThan(0);
     });
 
-    it('blocks reading another user\'s link (IDOR) with 404', async () => {
+    it('blocks reading, updating, and deleting another user\'s link (IDOR) with 404', async () => {
       const mine = await request(app.getHttpServer())
         .post('/links')
         .set('Authorization', `Bearer ${token}`)
         .send({ long_url: validUrl })
         .expect(201);
+
+      // GET IDOR
       await request(app.getHttpServer())
         .get(`/links/${mine.body.id}`)
+        .set('Authorization', `Bearer ${otherToken}`)
+        .expect(404);
+
+      // PATCH IDOR
+      await request(app.getHttpServer())
+        .patch(`/links/${mine.body.id}`)
+        .set('Authorization', `Bearer ${otherToken}`)
+        .send({ long_url: 'https://attacker.example.com' })
+        .expect(404);
+
+      // DELETE IDOR
+      await request(app.getHttpServer())
+        .delete(`/links/${mine.body.id}`)
         .set('Authorization', `Bearer ${otherToken}`)
         .expect(404);
     });

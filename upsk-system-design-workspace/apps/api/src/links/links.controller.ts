@@ -55,12 +55,15 @@ export class LinksController {
   search(
     @CurrentUser() user: RequestUser,
     @Query('q') q = '',
+    @Query('tag') tag?: string,
     @Query('page') page = '1',
+    @Query('page_size') pageSize?: string,
     @Query('limit') limit = '20',
   ) {
+    const rawLimit = pageSize ?? limit;
     const pageNum = Math.max(1, Number.parseInt(page, 10) || 1);
-    const limitNum = Math.min(100, Math.max(1, Number.parseInt(limit, 10) || 20));
-    return this.linksService.search(user.id, q, pageNum, limitNum);
+    const limitNum = Math.min(50, Math.max(1, Number.parseInt(rawLimit, 10) || 20));
+    return this.linksService.search(user.id, q, pageNum, limitNum, tag);
   }
 
   @UseGuards(JwtAuthGuard)

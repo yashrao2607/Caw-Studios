@@ -103,26 +103,42 @@ export class LinksService {
     };
   }
 
-  async search(createdBy: string, q: string, page = 1, limit = 20) {
-    const skip = (page - 1) * limit;
+  async search(
+    createdBy: string,
+    q: string,
+    page = 1,
+    limit = 20,
+    tag?: string,
+  ) {
+    const cappedLimit = Math.min(50, Math.max(1, limit));
+    const skip = (page - 1) * cappedLimit;
     const needle = q.trim();
-    const where =
-      needle.length === 0
-        ? { createdBy }
-        : {
-            createdBy,
-            OR: [
-              { longUrl: { contains: needle, mode: Prisma.QueryMode.insensitive } },
-              { code: { contains: needle, mode: Prisma.QueryMode.insensitive } },
-              { tags: { has: needle } },
-            ],
-          };
+
+    const andConditions: Prisma.LinkWhereInput[] = [{ createdBy }];
+
+    if (tag && tag.trim().length > 0) {
+      andConditions.push({ tags: { has: tag.trim() } });
+    }
+
+    if (needle.length > 0) {
+      andConditions.push({
+        OR: [
+          { longUrl: { contains: needle, mode: Prisma.QueryMode.insensitive } },
+          { code: { contains: needle, mode: Prisma.QueryMode.insensitive } },
+          { tags: { has: needle } },
+        ],
+      });
+    }
+
+    const where: Prisma.LinkWhereInput =
+      andConditions.length === 1 ? andConditions[0] : { AND: andConditions };
+
     const [items, total] = await this.prisma.$transaction([
       this.prisma.link.findMany({
         where,
         orderBy: { id: 'desc' },
         skip,
-        take: limit,
+        take: cappedLimit,
       }),
       this.prisma.link.count({ where }),
     ]);
@@ -131,7 +147,8 @@ export class LinksService {
       items: items.map((link) => this.toResponse(link)),
       total,
       page,
-      limit,
+      page_size: cappedLimit,
+      limit: cappedLimit,
     };
   }
 
