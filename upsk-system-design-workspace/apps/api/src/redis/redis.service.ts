@@ -21,6 +21,10 @@ export class RedisService implements OnApplicationShutdown {
     await this.client.del(key);
   }
 
+  async ping(): Promise<string> {
+    return this.client.ping();
+  }
+
   async onApplicationShutdown(): Promise<void> {
     this.client.disconnect();
   }
