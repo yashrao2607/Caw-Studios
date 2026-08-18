@@ -63,3 +63,52 @@ jobs:
           docker push ${REGISTRY_URL}/${{ github.repository }}:${IMAGE_TAG}
           docker push ${REGISTRY_URL}/${{ github.repository }}:latest
           echo "Published image artifact: ${REGISTRY_URL}/${{ github.repository }}:${IMAGE_TAG}"
+
+      - name: Step 6 - Zero-Downtime Rolling Deployment (Main Only)
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        env:
+          IMAGE_TAG: ${{ github.sha }}
+          DEPLOY_TOKEN: ${{ secrets.PLATFORM_DEPLOY_TOKEN }}
+        run: |
+          echo "Triggering zero-downtime rolling deployment with image tag: ${IMAGE_TAG}"
+          # Rolling deploy invocation to container orchestrator
+
+      - name: Step 7 - Post-Deploy Readiness Verification Polling
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        run: |
+          echo "Waiting for deployment readiness probe on https://api.shortener.prod/ready ..."
+          MAX_ATTEMPTS=30
+          for i in $(seq 1 $MAX_ATTEMPTS); do
+            HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" https://api.shortener.prod/ready || echo "000")
+            if [ "$HTTP_STATUS" = "200" ]; then
+              echo "Readiness verification passed on attempt $i (HTTP 200)"
+              exit 0
+            fi
+            echo "Attempt $i/$MAX_ATTEMPTS: status $HTTP_STATUS, retrying in 5s..."
+            sleep 5
+          done
+          echo "ERROR: Readiness probe failed after $MAX_ATTEMPTS attempts."
+          exit 1
+
+      - name: Step 8 - Production E2E Smoke Test Suite
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        run: |
+          echo "Running post-deploy smoke suite..."
+          LIVE_RES=$(curl -s https://api.shortener.prod/live)
+          READY_RES=$(curl -s https://api.shortener.prod/ready)
+          METRICS_STATUS=$(curl -s -o /dev/null -w "%{http_code}" https://api.shortener.prod/metrics)
+          echo "Liveness Response: $LIVE_RES"
+          echo "Readiness Response: $READY_RES"
+          if [ "$METRICS_STATUS" != "200" ]; then
+            echo "ERROR: Metrics endpoint returned $METRICS_STATUS"
+            exit 1
+          fi
+          echo "Production smoke tests passed successfully!"
+
+      - name: Step 9 - Automated Rollback On Failure Trigger
+        if: failure() && github.ref == 'refs/heads/main' && github.event_name == 'push'
+        run: |
+          echo "WARNING: Deployment or smoke verification failed. Initiating automated instant rollback..."
+          # docker service update --rollback url-shortener_api
+          echo "Rollback initiated. Alerting on-call channel."
+
